@@ -1,181 +1,166 @@
-import axios, { AxiosResponse } from 'axios';
+2
+import httpClient from './httpClient';
+import {
+  RECORD_HEADERS,
+  SELECT_RECORD_HEADERS,
+} from '../constants/aprimo';
+import { UpdateRecordFieldRequest } from '../models/aprimo/UpdateRecordFieldRequest';
+import { AprimoRecord } from '../models/aprimo/AprimoRecord';
 import config from '../config/env';
+import { validateRecordId } from '../utils/recordIdValidator';
+import { logAprimoRequestError } from '../utils/aprimoErrorLogger';
 import { httpsAgent } from '../constants/httpAgent';
 import logger from '../utils/logger';
-import { executeWithRetry } from '../utils/httpRetry';
 
-type AprimoTokenResponse = {
-  access_token: string;
-  expires_in: number;
-  token_type?: string;
-};
-
-class AprimoTokenService {
-  private static cachedAccessToken: string | null = null;
-
-  private static tokenExpiresAt = 0;
-
-  private static readonly TOKEN_EXPIRY_BUFFER_MS = 10 * 60 * 1000;
-
-  public static async getAprimoAccessToken(): Promise<string> {
-    if (
-      AprimoTokenService.isCachedTokenValid() &&
-      AprimoTokenService.cachedAccessToken
-    ) {
-      logger.info({
-        msg: 'Using cached Aprimo access token',
-        options: {
-          tokenRemainingSeconds:
-            AprimoTokenService.getTokenRemainingSeconds(),
-          tokenExpiresAt: new Date(
-            AprimoTokenService.tokenExpiresAt
-          ).toISOString(),
-        },
-      });
-
-      return AprimoTokenService.cachedAccessToken;
-    }
+class RecordService {
+  public static async getRecordById(recordId: string): Promise<AprimoRecord> {
+    const validatedRecordId = validateRecordId(recordId);
 
     logger.info({
-      msg: 'Generating new Aprimo access token',
+      msg: 'Calling Aprimo GET record api',
       options: {
-        tokenUrl: config.APRIMO_TOKEN_URL,
-        scope: config.APRIMO_SCOPE,
+        recordId,
       },
     });
 
-    const body = AprimoTokenService.buildTokenRequestBody();
-
     try {
-      const response: AxiosResponse<AprimoTokenResponse> =
-        await executeWithRetry<AxiosResponse<AprimoTokenResponse>>(
-          () =>
-            axios.post<AprimoTokenResponse>(
-              config.APRIMO_TOKEN_URL,
-              body.toString(),
-              {
-                headers: {
-                  'Content-Type': 'application/x-www-form-urlencoded',
-                },
-                timeout: 3000,
-                httpsAgent,
-              }
-            ),
-          {
-            onRetry: (error, retryAttempt, delayMs) => {
-              AprimoTokenService.logTokenRetry(error, retryAttempt, delayMs);
-            },
-          }
-        );
-
-      AprimoTokenService.cachedAccessToken = response.data.access_token;
-      AprimoTokenService.tokenExpiresAt =
-        Date.now() + response.data.expires_in * 1000;
+      const response = await httpClient.get<AprimoRecord>(
+        `/api/core/record/${validatedRecordId}`,
+        {
+          headers: {
+            ...RECORD_HEADERS,
+          },
+          httpsAgent,
+        }
+      );
 
       logger.info({
-        msg: 'Aprimo access token generated successfully',
+        msg: 'Aprimo GET record api completed successfully',
         options: {
-          expiresInSeconds: response.data.expires_in,
-          tokenType: response.data.token_type,
-          tokenExpiresAt: new Date(
-            AprimoTokenService.tokenExpiresAt
-          ).toISOString(),
+          recordId,
+          statusCode: response.status,
         },
       });
 
-      return AprimoTokenService.cachedAccessToken;
+      return response.data;
     } catch (error) {
-      AprimoTokenService.logTokenError(error);
+      logAprimoRequestError(error, 'Aprimo GET record api request failed');
       throw error;
     }
   }
 
-  private static buildTokenRequestBody(): URLSearchParams {
-    const body = new URLSearchParams();
+  public static async getRecordWithSelectedFields(
+    recordId: string,
+    selectFields: string[]
+  ): Promise<AprimoRecord> {
+    const validatedRecordId = validateRecordId(recordId);
 
-    body.append('grant_type', 'client_credentials');
-    body.append('scope', config.APRIMO_SCOPE);
-    body.append('client_id', config.APRIMO_CLIENT_ID);
-    body.append('client_secret', config.APRIMO_CLIENT_SECRET);
+    logger.info({
+      msg: 'Calling Aprimo GET record api with selected fields',
+      options: {
+        recordId,
+        selectFields,
+      },
+    });
 
-    return body;
-  }
+    try {
+      const response = await httpClient.get<AprimoRecord>(
+        `/api/core/record/${validatedRecordId}`,
+        {
+          headers: {
+            ...SELECT_RECORD_HEADERS,
+            'select-record-fields': selectFields.join(','),
+          },
+          httpsAgent,
+        }
+      );
 
-  private static isCachedTokenValid(): boolean {
-    return (
-      AprimoTokenService.cachedAccessToken !== null &&
-      Date.now() <
-        AprimoTokenService.tokenExpiresAt -
-          AprimoTokenService.TOKEN_EXPIRY_BUFFER_MS
-    );
-  }
-
-  private static getTokenRemainingSeconds(): number {
-    const remainingMs = AprimoTokenService.tokenExpiresAt - Date.now();
-
-    if (remainingMs <= 0) {
-      return 0;
-    }
-
-    return Math.floor(remainingMs / 1000);
-  }
-
-  private static logTokenRetry(
-    error: unknown,
-    retryAttempt: number,
-    delayMs: number
-  ): void {
-    if (axios.isAxiosError(error)) {
-      logger.warn({
-        msg: 'Retrying Aprimo token request',
+      logger.info({
+        msg: 'Aprimo GET record api completed successfully',
         options: {
-          retryAttempt,
-          delayMs,
-          status: error.response?.status,
-          url: error.config?.url,
-          method: error.config?.method,
+          recordId,
+          selectFields,
+          statusCode: response.status,
         },
       });
 
-      return;
+      return response.data;
+    } catch (error) {
+      logAprimoRequestError(error, 'Aprimo get api request failed');
+      throw error;
     }
-
-    logger.warn({
-      msg: 'Retrying Aprimo token request',
-      options: {
-        retryAttempt,
-        delayMs,
-        error: error instanceof Error ? error.message : String(error),
-      },
-    });
   }
 
-  private static logTokenError(error: unknown): void {
-    if (axios.isAxiosError(error)) {
-      logger.error({
-        msg: 'Failed to generate aprimo access token',
+  public static async updateRecordField(
+    recordId: string,
+    fieldId: string,
+    value: string
+  ): Promise<AprimoRecord> {
+    const validatedRecordId = validateRecordId(recordId);
+
+    logger.info({
+      msg: 'Calling Aprimo update record field api',
+      options: {
+        recordId,
+        fieldId,
+        value,
+      },
+    });
+
+    try {
+      const requestBody = new UpdateRecordFieldRequest(
+        fieldId,
+        config.APRIMO_LANGUAGE_ID,
+        value
+      );
+
+      const response = await httpClient.put<AprimoRecord>(
+        `/api/core/record/${validatedRecordId}`,
+        requestBody,
+        {
+          headers: {
+            ...RECORD_HEADERS,
+            'Content-Type': 'application/json',
+          },
+          httpsAgent,
+        }
+      );
+
+      logger.info({
+        msg: 'Aprimo update record field API completed successfully',
         options: {
-          status: error.response?.status,
-          response: error.response?.data,
-          url: error.config?.url,
-          method: error.config?.method,
-          reqBody: error.config?.data?.toString?.()
+          recordId,
+          fieldId,
+          updatedValue: value,
+          statusCode: response.status,
         },
       });
 
-      return;
+      return response.data;
+    } catch (error) {
+      logAprimoRequestError(
+        error,
+        'Aprimo update record record field api request failed'
+      );
+      throw error;
     }
-
-    logger.error({
-      msg: 'Failed to generate aprimo access token',
-      options: {
-        error: error instanceof Error ? error.message : String(error),
-      },
-    });
   }
 }
 
-export const getAprimoAccessToken = (): Promise<string> =>
-  AprimoTokenService.getAprimoAccessToken();
+export const getRecordById = (recordId: string): Promise<AprimoRecord> =>
+  RecordService.getRecordById(recordId);
 
-export default AprimoTokenService;
+export const getRecordWithSelectedFields = (
+  recordId: string,
+  selectFields: string[]
+): Promise<AprimoRecord> =>
+  RecordService.getRecordWithSelectedFields(recordId, selectFields);
+
+export const updateRecordField = (
+  recordId: string,
+  fieldId: string,
+  value: string
+): Promise<AprimoRecord> =>
+  RecordService.updateRecordField(recordId, fieldId, value);
+
+export default RecordService;
