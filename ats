@@ -1,166 +1,149 @@
-2
-import httpClient from './httpClient';
-import {
-  RECORD_HEADERS,
-  SELECT_RECORD_HEADERS,
-} from '../constants/aprimo';
-import { UpdateRecordFieldRequest } from '../models/aprimo/UpdateRecordFieldRequest';
-import { AprimoRecord } from '../models/aprimo/AprimoRecord';
-import config from '../config/env';
-import { validateRecordId } from '../utils/recordIdValidator';
-import { logAprimoRequestError } from '../utils/aprimoErrorLogger';
-import { httpsAgent } from '../constants/httpAgent';
+3
+import { AprimoContentTypes } from '../constants/aprimoContentTypes';
+import { AssetExpiryWebhookPayload } from '../models/aprimo/WebhookPayload';
+import { processUsageRightWebhook } from './usageRightWebhookProcessor';
+import { processAssetWebhook } from './assetWebhookProcessor';
 import logger from '../utils/logger';
 
-class RecordService {
-  public static async getRecordById(recordId: string): Promise<AprimoRecord> {
-    const validatedRecordId = validateRecordId(recordId);
+class WebhookService {
+  public static async processAssetExpiryWebhook(
+    payload: AssetExpiryWebhookPayload
+  ): Promise<void> {
+    const {
+      recordId,
+      contentType,
+      triggerType,
+      environment,
+      urrEndDate,
+      calculatedExpirationDate,
+    } = payload;
 
     logger.info({
-      msg: 'Calling Aprimo GET record api',
+      msg: 'Started processing asset expiry webhook',
       options: {
         recordId,
+        contentType,
+        triggerType,
+        environment,
+        urrEndDate,
+        calculatedExpirationDate,
       },
     });
 
     try {
-      const response = await httpClient.get<AprimoRecord>(
-        `/api/core/record/${validatedRecordId}`,
-        {
-          headers: {
-            ...RECORD_HEADERS,
+      if (!recordId || !contentType) {
+        logger.warn({
+          msg: 'Invalid asset expiry webhook payload',
+          options: {
+            recordId,
+            contentType,
+            triggerType,
+            environment,
           },
-          httpsAgent,
+        });
+
+        throw new Error('recordId and contentType are required in webhook payload');
+      }
+
+      if (contentType === AprimoContentTypes.USAGE_RIGHTS_RECORD) {
+        logger.debug({
+          msg: 'Webhook service content type and record id',
+          options: {
+            contentType,
+            recordId,
+          },
+        });
+
+        logger.info({
+          msg: 'Usage right record flow selected',
+          options: {
+            recordId,
+            contentType,
+            triggerType,
+            urrEndDate,
+          },
+        });
+
+        if (!urrEndDate) {
+          logger.warn({
+            msg: 'Invalid usage rights webhook payload',
+            options: {
+              recordId,
+              contentType,
+              urrEndDate,
+            },
+          });
+
+          throw new Error('urrEndDate is required for usage right record webhook');
         }
-      );
+
+        await processUsageRightWebhook(payload);
+
+        logger.info({
+          msg: 'Usage right record webhook processing completed',
+          options: {
+            recordId,
+            contentType,
+            urrEndDate,
+          },
+        });
+
+        return;
+      }
 
       logger.info({
-        msg: 'Aprimo GET record api completed successfully',
+        msg: 'Asset or non-URR flow selected',
         options: {
           recordId,
-          statusCode: response.status,
+          contentType,
+          triggerType,
+          calculatedExpirationDate,
         },
       });
 
-      return response.data;
-    } catch (error) {
-      logAprimoRequestError(error, 'Aprimo GET record api request failed');
-      throw error;
-    }
-  }
-
-  public static async getRecordWithSelectedFields(
-    recordId: string,
-    selectFields: string[]
-  ): Promise<AprimoRecord> {
-    const validatedRecordId = validateRecordId(recordId);
-
-    logger.info({
-      msg: 'Calling Aprimo GET record api with selected fields',
-      options: {
-        recordId,
-        selectFields,
-      },
-    });
-
-    try {
-      const response = await httpClient.get<AprimoRecord>(
-        `/api/core/record/${validatedRecordId}`,
-        {
-          headers: {
-            ...SELECT_RECORD_HEADERS,
-            'select-record-fields': selectFields.join(','),
+      if (!calculatedExpirationDate) {
+        logger.warn({
+          msg: 'calculatedExpirationDate missing for non-URR webhook, continuing with available linked URR end dates',
+          options: {
+            recordId,
+            contentType,
+            triggerType,
+            environment,
           },
-          httpsAgent,
-        }
-      );
+        });
+      }
+
+      await processAssetWebhook(payload);
 
       logger.info({
-        msg: 'Aprimo GET record api completed successfully',
+        msg: 'Asset or non-URR webhook processing completed',
         options: {
           recordId,
-          selectFields,
-          statusCode: response.status,
+          contentType,
+          calculatedExpirationDate,
+        },
+      });
+    } catch (error) {
+      logger.error({
+        msg: 'Asset expiry webhook processing failed',
+        options: {
+          recordId,
+          contentType,
+          triggerType,
+          environment,
+          urrEndDate,
+          calculatedExpirationDate,
+          errorMessage: error instanceof Error ? error.message : String(error),
         },
       });
 
-      return response.data;
-    } catch (error) {
-      logAprimoRequestError(error, 'Aprimo get api request failed');
-      throw error;
-    }
-  }
-
-  public static async updateRecordField(
-    recordId: string,
-    fieldId: string,
-    value: string
-  ): Promise<AprimoRecord> {
-    const validatedRecordId = validateRecordId(recordId);
-
-    logger.info({
-      msg: 'Calling Aprimo update record field api',
-      options: {
-        recordId,
-        fieldId,
-        value,
-      },
-    });
-
-    try {
-      const requestBody = new UpdateRecordFieldRequest(
-        fieldId,
-        config.APRIMO_LANGUAGE_ID,
-        value
-      );
-
-      const response = await httpClient.put<AprimoRecord>(
-        `/api/core/record/${validatedRecordId}`,
-        requestBody,
-        {
-          headers: {
-            ...RECORD_HEADERS,
-            'Content-Type': 'application/json',
-          },
-          httpsAgent,
-        }
-      );
-
-      logger.info({
-        msg: 'Aprimo update record field API completed successfully',
-        options: {
-          recordId,
-          fieldId,
-          updatedValue: value,
-          statusCode: response.status,
-        },
-      });
-
-      return response.data;
-    } catch (error) {
-      logAprimoRequestError(
-        error,
-        'Aprimo update record record field api request failed'
-      );
       throw error;
     }
   }
 }
 
-export const getRecordById = (recordId: string): Promise<AprimoRecord> =>
-  RecordService.getRecordById(recordId);
+export const processAssetExpiryWebhook = (
+  payload: AssetExpiryWebhookPayload
+): Promise<void> => WebhookService.processAssetExpiryWebhook(payload);
 
-export const getRecordWithSelectedFields = (
-  recordId: string,
-  selectFields: string[]
-): Promise<AprimoRecord> =>
-  RecordService.getRecordWithSelectedFields(recordId, selectFields);
-
-export const updateRecordField = (
-  recordId: string,
-  fieldId: string,
-  value: string
-): Promise<AprimoRecord> =>
-  RecordService.updateRecordField(recordId, fieldId, value);
-
-export default RecordService;
+export default WebhookService;
