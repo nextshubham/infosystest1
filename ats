@@ -1,4 +1,4 @@
-4
+5
 import {
   APRIMO_FIELD_IDS,
   SELECT_RECORD_FIELDS,
@@ -10,50 +10,51 @@ import {
   updateRecordField,
 } from './recordService';
 import {
-  extractCalculatedExpirationDate,
-  extractChildrenRecordIds,
+  extractParentRecordIds,
+  extractUrrEndDate,
 } from '../utils/aprimoRecordUtils';
 import { getMinimumDate } from '../utils/dateUtils';
 import logger from '../utils/logger';
 import IntegrationErrorService from './integrationErrorService';
 
-class UsageRightWebhookProcessor {
-  public static async processUsageRightWebhook(
+class AssetWebhookProcessor {
+  public static async processAssetWebhook(
     payload: AssetExpiryWebhookPayload
   ): Promise<void> {
-    const { environment, recordId, contentType, triggerType, urrEndDate } =
-      payload;
+    const {
+      environment,
+      recordId,
+      contentType,
+      triggerType,
+      calculatedExpirationDate,
+    } = payload;
 
     logger.info({
-      msg: 'Started processing usage rights record webhook',
+      msg: 'Started processing Asset / non-URR webhook',
       options: {
         recordId,
         contentType,
         triggerType,
         environment,
-        urrEndDate,
+        calculatedExpirationDate,
       },
     });
 
-    if (!payload.urrEndDate) {
+    if (!payload.calculatedExpirationDate) {
       logger.warn({
-        msg: 'Usage rights record webhook payload missing urrEndDate',
+        msg: 'Asset / non-URR webhook payload missing calculatedExpirationDate, continuing with linked URR end dates',
         options: {
           recordId,
           contentType,
           triggerType,
-          urrEndDate,
+          environment,
         },
       });
-
-      throw new Error(
-        'urrEndDate is required for Usage Right Record webhook'
-      );
     }
 
     try {
       logger.info({
-        msg: 'Fetching usage rights record from aprimo',
+        msg: 'Fetching Asset / non-URR record from Aprimo',
         options: {
           recordId,
           selectedFields: [
@@ -62,59 +63,130 @@ class UsageRightWebhookProcessor {
         },
       });
 
-      const urrRecord = await getRecordWithSelectedFields(payload.recordId, [
+      const assetRecord = await getRecordWithSelectedFields(payload.recordId, [
         SELECT_RECORD_FIELDS.URR_LINK_BETWEEN_USAGE_RIGHT_AND_ASSET,
       ]);
 
-      const childRecordIds = extractChildrenRecordIds(urrRecord);
-
       logger.info({
-        msg: 'Linked child asset records extracted from usage rights record',
+        msg: 'Asset / non-URR record retrieved successfully from Aprimo',
         options: {
           recordId: payload.recordId,
-          linkedChildAssetCount: childRecordIds.length,
-          linkedChildAssetIds: childRecordIds,
         },
       });
 
-      if (childRecordIds.length === 0) {
+      const parentRecordIds = extractParentRecordIds(assetRecord);
+
+      logger.info({
+        msg: 'Linked parent Usage Rights Records extracted from asset',
+        options: {
+          recordId: payload.recordId,
+          parentUsageRightRecordCount: parentRecordIds.length,
+          parentUsageRightRecordIds: parentRecordIds,
+        },
+      });
+
+      if (parentRecordIds.length === 0) {
         logger.warn({
-          msg: 'No linked child assets found for usage rights record',
+          msg: 'No linked parent Usage Rights Records found for asset',
           options: {
             recordId: payload.recordId,
+            calculatedExpirationDate: payload.calculatedExpirationDate,
+          },
+        });
+      }
+
+      const urrEndDates = await Promise.all(
+        parentRecordIds.map((parentRecordId) =>
+          AssetWebhookProcessor.getParentUsageRightEndDate(
+            payload.recordId,
+            parentRecordId
+          )
+        )
+      );
+
+      logger.info({
+        msg: 'Completed extraction of URR end dates for asset',
+        options: {
+          recordId: payload.recordId,
+          calculatedExpirationDate: payload.calculatedExpirationDate,
+          urrEndDates,
+        },
+      });
+
+      const datesToCompare = [
+        payload.calculatedExpirationDate,
+        ...urrEndDates,
+      ].filter((date): date is string => Boolean(date));
+
+      const minimumDate = getMinimumDate(datesToCompare);
+
+      logger.info({
+        msg: 'Calculated minimum expiration date for Asset / non-URR record',
+        options: {
+          recordId: payload.recordId,
+          calculatedExpirationDate: payload.calculatedExpirationDate,
+          urrEndDates,
+          minimumDate,
+        },
+      });
+
+      if (!minimumDate) {
+        logger.warn({
+          msg: 'Minimum expiration date not available, skipping asset update',
+          options: {
+            recordId: payload.recordId,
+            calculatedExpirationDate: payload.calculatedExpirationDate,
+            urrEndDates,
           },
         });
 
         return;
       }
 
-      await Promise.all(
-        childRecordIds.map((childRecordId) =>
-          UsageRightWebhookProcessor.processChildAssetRecord(
-            payload,
-            childRecordId
-          )
-        )
+      logger.info({
+        msg: 'Updating calculated expiration date on Asset / non-URR record',
+        options: {
+          recordId: payload.recordId,
+          fieldId: APRIMO_FIELD_IDS.CU_CALCULATED_EXPIRATION_DATE,
+          value: minimumDate,
+        },
+      });
+
+      await updateRecordField(
+        payload.recordId,
+        APRIMO_FIELD_IDS.CU_CALCULATED_EXPIRATION_DATE,
+        minimumDate
       );
 
       logger.info({
-        msg: 'Completed usage right record webhook processing',
+        msg: 'Calculated expiration date updated successfully on Asset / non-URR record',
         options: {
-          recordId,
-          totalLinkedChildAssets: childRecordIds.length,
+          recordId: payload.recordId,
+          fieldId: APRIMO_FIELD_IDS.CU_CALCULATED_EXPIRATION_DATE,
+          updatedValue: minimumDate,
+        },
+      });
+
+      logger.info({
+        msg: 'Completed Asset / non-URR webhook processing',
+        options: {
+          recordId: payload.recordId,
+          contentType: payload.contentType,
+          parentUsageRightRecordCount: parentRecordIds.length,
+          calculatedExpirationDate: payload.calculatedExpirationDate,
+          finalCalculatedExpirationDate: minimumDate,
         },
       });
     } catch (error) {
       logger.error({
-        msg: 'Usage right record webhook processing failed',
+        msg: 'Asset / non-URR webhook processing failed',
         options: {
-          environment,
-          recordId,
-          contentType,
-          triggerType,
-          urrEndDate,
-          errorMessage:
-            error instanceof Error ? error.message : String(error),
+          recordId: payload.recordId,
+          contentType: payload.contentType,
+          triggerType: payload.triggerType,
+          environment: payload.environment,
+          calculatedExpirationDate: payload.calculatedExpirationDate,
+          error: error instanceof Error ? error.message : String(error),
         },
       });
 
@@ -129,111 +201,45 @@ class UsageRightWebhookProcessor {
     }
   }
 
-  private static async processChildAssetRecord(
-    payload: AssetExpiryWebhookPayload,
-    childRecordId: string
-  ): Promise<void> {
-    const { recordId, urrEndDate } = payload;
+  private static async getParentUsageRightEndDate(
+    assetRecordId: string,
+    parentRecordId: string
+  ): Promise<string | undefined> {
+    logger.info({
+      msg: 'Fetching linked parent Usage Rights Record from Aprimo',
+      options: {
+        assetRecordId,
+        urrRecordId: parentRecordId,
+      },
+    });
+
+    const urrRecord = await getRecordById(parentRecordId);
 
     logger.info({
-      msg: 'Started processing linked child asset for usage rights record',
+      msg: 'Linked parent Usage Rights Record retrieved successfully from Aprimo',
       options: {
-        recordId,
-        childRecordId,
+        assetRecordId,
+        urrRecordId: parentRecordId,
+      },
+    });
+
+    const urrEndDate = extractUrrEndDate(urrRecord);
+
+    logger.info({
+      msg: 'Extracted URR end date from linked parent Usage Rights Record',
+      options: {
+        assetRecordId,
+        urrRecordId: parentRecordId,
         urrEndDate,
       },
     });
 
-    logger.info({
-      msg: 'Fetching linked child asset record from aprimo',
-      options: {
-        recordId,
-        childRecordId,
-      },
-    });
-
-    const childRecord = await getRecordById(childRecordId);
-
-    logger.info({
-      msg: 'Linked child asset record retrieved successfully from aprimo',
-      options: {
-        recordId,
-        childRecordId,
-      },
-    });
-
-    const existingCalculatedExpirationDate =
-      extractCalculatedExpirationDate(childRecord);
-
-    logger.info({
-      msg: 'Extracted existing calculated expiration date from child asset',
-      options: {
-        recordId,
-        childRecordId,
-        calculatedExpirationDate: existingCalculatedExpirationDate,
-      },
-    });
-
-    const minimumDate = getMinimumDate([
-      existingCalculatedExpirationDate,
-      payload.urrEndDate,
-    ]);
-
-    logger.info({
-      msg: 'Calculated minimum expiration date for child asset',
-      options: {
-        recordId,
-        childRecordId,
-        existingCalculatedExpirationDate,
-        urrEndDate: payload.urrEndDate,
-        minimumDate,
-      },
-    });
-
-    if (!minimumDate) {
-      logger.warn({
-        msg: 'Minimum expiration date not available, skipping child asset update',
-        options: {
-          recordId,
-          childRecordId,
-          existingCalculatedExpirationDate,
-          urrEndDate,
-        },
-      });
-
-      return;
-    }
-
-    logger.info({
-      msg: 'Updating CU calculated expiration date child record',
-      options: {
-        recordId,
-        childRecordId,
-        fieldId: APRIMO_FIELD_IDS.CU_CALCULATED_EXPIRATION_DATE,
-        cuCalculatedExpirationDate: minimumDate,
-      },
-    });
-
-    await updateRecordField(
-      childRecordId,
-      APRIMO_FIELD_IDS.CU_CALCULATED_EXPIRATION_DATE,
-      minimumDate
-    );
-
-    logger.info({
-      msg: 'Calculated expiration date updated successfully on child asset',
-      options: {
-        recordId,
-        childRecordId,
-        cuCalculatedExpirationDate: minimumDate,
-      },
-    });
+    return urrEndDate;
   }
 }
 
-export const processUsageRightWebhook = (
+export const processAssetWebhook = (
   payload: AssetExpiryWebhookPayload
-): Promise<void> =>
-  UsageRightWebhookProcessor.processUsageRightWebhook(payload);
+): Promise<void> => AssetWebhookProcessor.processAssetWebhook(payload);
 
-export default UsageRightWebhookProcessor;
+export default AssetWebhookProcessor;
