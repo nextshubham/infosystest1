@@ -1,20 +1,52 @@
-private static sanitizeTokenRequestBody(data: unknown): string | undefined {
-  if (!data) {
+import axios from 'axios';
+import logger from './logger';
+
+const MASKED_VALUE = '***MASKED***';
+
+const sanitizeHeaders = (
+  headers: unknown
+): Record<string, unknown> | undefined => {
+  if (!headers || typeof headers !== 'object') {
     return undefined;
   }
 
-  const requestBody = data.toString();
+  const headersObject =
+    'toJSON' in headers && typeof headers.toJSON === 'function'
+      ? (headers.toJSON() as Record<string, unknown>)
+      : (headers as Record<string, unknown>);
 
-  const params = new URLSearchParams(requestBody);
+  return Object.entries(headersObject).reduce<Record<string, unknown>>(
+    (sanitizedHeaders, [key, value]) => {
+      if (
+        key.toLowerCase() === 'authorization' ||
+        key.toLowerCase() === 'proxy-authorization'
+      ) {
+        sanitizedHeaders[key] = MASKED_VALUE;
+        return sanitizedHeaders;
+      }
 
-  const sensitiveFields = ['client_id', 'client_secret', 'access_token', 'token'];
+      sanitizedHeaders[key] = value;
+      return sanitizedHeaders;
+    },
+    {}
+  );
+};
 
-  sensitiveFields.forEach((field) => {
-    if (params.has(field)) {
-      params.set(field, '***MASKED***');
-    }
+export const logAprimoRequestError = (
+  error: unknown,
+  message: string
+): void => {
+  if (!axios.isAxiosError(error)) {
+    throw error;
+  }
+
+  logger.error({
+    msg: message,
+    options: {
+      status: error.response?.status,
+      response: JSON.stringify(error.response?.data, null, 2),
+      url: error.config?.url,
+      headers: sanitizeHeaders(error.config?.headers),
+    },
   });
-
-  return params.toString();
-}
-reqBody: AprimoTokenService.sanitizeTokenRequestBody(error.config?.data),
+};
