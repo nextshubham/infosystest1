@@ -26,15 +26,10 @@ type HeadersWithToJson = {
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
 
-const hasToJson = (value: unknown): value is HeadersWithToJson => {
-  if (!isRecord(value)) {
-    return false;
-  }
+const hasToJson = (value: unknown): value is HeadersWithToJson =>
+  isRecord(value) && typeof value.toJSON === 'function';
 
-  return typeof value.toJSON === 'function';
-};
-
-function sanitizeUnknownValue(value: unknown): unknown {
+const sanitizeUnknownValue = (value: unknown): unknown => {
   if (Array.isArray(value)) {
     return value.map(sanitizeUnknownValue);
   }
@@ -44,19 +39,19 @@ function sanitizeUnknownValue(value: unknown): unknown {
   }
 
   return value;
-}
+};
 
-function sanitizeObject(data: Record<string, unknown>): Record<string, unknown> {
-  return Object.entries(data).reduce<Record<string, unknown>>(
-    (sanitizedData, [key, value]) => ({
-      ...sanitizedData,
-      [key]: SENSITIVE_FIELD_NAMES.includes(key.toLowerCase())
+const sanitizeObject = (
+  data: Record<string, unknown>
+): Record<string, unknown> =>
+  Object.fromEntries(
+    Object.entries(data).map(([key, value]) => [
+      key,
+      SENSITIVE_FIELD_NAMES.includes(key.toLowerCase())
         ? MASKED_VALUE
         : sanitizeUnknownValue(value),
-    }),
-    {}
+    ])
   );
-}
 
 const getHeadersObject = (
   headers: unknown
@@ -81,14 +76,13 @@ const sanitizeHeaders = (
     return undefined;
   }
 
-  return Object.entries(headersObject).reduce<Record<string, unknown>>(
-    (sanitizedHeaders, [key, value]) => ({
-      ...sanitizedHeaders,
-      [key]: SENSITIVE_HEADER_NAMES.includes(key.toLowerCase())
+  return Object.fromEntries(
+    Object.entries(headersObject).map(([key, value]) => [
+      key,
+      SENSITIVE_HEADER_NAMES.includes(key.toLowerCase())
         ? MASKED_VALUE
         : value,
-    }),
-    {}
+    ])
   );
 };
 
@@ -125,26 +119,23 @@ export const logAprimoRequestError = (
   error: unknown,
   message: string
 ): void => {
-  if (axios.isAxiosError(error)) {
-    logger.error({
-      msg: message,
-      options: {
-        status: error.response?.status,
-        response: sanitizeUnknownValue(error.response?.data),
-        url: error.config?.url,
-        method: error.config?.method,
-        headers: sanitizeHeaders(error.config?.headers),
-        reqBody: sanitizeRequestBody(error.config?.data),
-      },
-    });
-
-    return;
+  if (!axios.isAxiosError(error)) {
+    throw error;
   }
 
   logger.error({
     msg: message,
     options: {
-      error: error instanceof Error ? error.message : String(error),
+      status: error.response?.status,
+      response: JSON.stringify(
+        sanitizeUnknownValue(error.response?.data),
+        null,
+        2
+      ),
+      url: error.config?.url,
+      method: error.config?.method,
+      headers: sanitizeHeaders(error.config?.headers),
+      reqBody: sanitizeRequestBody(error.config?.data),
     },
   });
 };
