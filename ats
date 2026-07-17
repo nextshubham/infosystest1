@@ -1,29 +1,5 @@
-9
-import axios from 'axios';
-import config from '../config/env';
-import httpsAgent from '../constants/httpAgent';
-import { executeWithRetry } from '../utils/httpRetry';
-import logger from '../utils/logger';
-
-interface AprimoTokenResponse {
-  access_token: string;
-  expires_in: number;
-  token_type?: string;
-}
-
-interface CachedToken {
-  accessToken: string;
-  expiresAt: number;
-}
-
-class AprimoTokenService {
-  private static cachedToken: CachedToken | null = null;
-
-  private static readonly TOKEN_EXPIRY_BUFFER_MS = 10 * 60 * 1000;
-
-  private static readonly MASKED_VALUE = '***MASKED***';
-
-  private static readonly SENSITIVE_FIELDS = [
+private static maskSensitiveParams(params: URLSearchParams): string {
+  const sensitiveFields = [
     'client_id',
     'client_secret',
     'access_token',
@@ -31,150 +7,35 @@ class AprimoTokenService {
     'token',
   ];
 
-  public static async getAprimoAccessToken(): Promise<string> {
-    if (AprimoTokenService.isCachedTokenValid()) {
-      logger.info({
-        msg: 'Using cached Aprimo access token',
-      });
-
-      return AprimoTokenService.cachedToken!.accessToken;
+  sensitiveFields.forEach((field) => {
+    if (params.has(field)) {
+      params.set(field, '***MASKED***');
     }
+  });
 
-    logger.info({
-      msg: 'Generating new Aprimo access token',
-    });
+  return params.toString();
+}
 
-    try {
-      const requestBody = AprimoTokenService.buildTokenRequestBody();
-
-      const response = await executeWithRetry(
-        () =>
-          axios.post<AprimoTokenResponse>(
-            config.aprimo.tokenUrl,
-            requestBody,
-            {
-              headers: {
-                Accept: 'application/json',
-                'Content-Type': 'application/x-www-form-urlencoded',
-              },
-              httpsAgent,
-            }
-          ),
-        'Generate Aprimo access token'
-      );
-
-      const { access_token: accessToken, expires_in: expiresIn } =
-        response.data;
-
-      if (!accessToken) {
-        throw new Error('Aprimo token response does not contain access token');
-      }
-
-      AprimoTokenService.cachedToken = {
-        accessToken,
-        expiresAt:
-          Date.now() +
-          expiresIn * 1000 -
-          AprimoTokenService.TOKEN_EXPIRY_BUFFER_MS,
-      };
-
-      logger.info({
-        msg: 'Aprimo access token generated successfully',
-        options: {
-          expiresIn,
-        },
-      });
-
-      return accessToken;
-    } catch (error) {
-      AprimoTokenService.logTokenError(error);
-      throw error;
-    }
+private static sanitizeTokenRequestBody(data: unknown): string | undefined {
+  if (!data) {
+    return undefined;
   }
 
-  private static isCachedTokenValid(): boolean {
-    return Boolean(
-      AprimoTokenService.cachedToken &&
-        Date.now() < AprimoTokenService.cachedToken.expiresAt
+  if (data instanceof URLSearchParams) {
+    return AprimoTokenService.maskSensitiveParams(
+      new URLSearchParams(data)
     );
   }
 
-  private static buildTokenRequestBody(): URLSearchParams {
-    const params = new URLSearchParams();
-
-    params.append('grant_type', 'client_credentials');
-    params.append('client_id', config.aprimo.clientId);
-    params.append('client_secret', config.aprimo.clientSecret);
-
-    if (config.aprimo.scope) {
-      params.append('scope', config.aprimo.scope);
-    }
-
-    return params;
+  if (typeof data === 'string') {
+    return AprimoTokenService.maskSensitiveParams(
+      new URLSearchParams(data)
+    );
   }
 
-  private static maskSensitiveParams(params: URLSearchParams): string {
-    AprimoTokenService.SENSITIVE_FIELDS.forEach((field) => {
-      if (params.has(field)) {
-        params.set(field, AprimoTokenService.MASKED_VALUE);
-      }
-    });
-
-    return params.toString();
+  if (typeof data === 'object') {
+    return JSON.stringify(data);
   }
 
-  private static sanitizeTokenRequestBody(data: unknown): string | undefined {
-    if (!data) {
-      return undefined;
-    }
-
-    if (data instanceof URLSearchParams) {
-      return AprimoTokenService.maskSensitiveParams(
-        new URLSearchParams(data)
-      );
-    }
-
-    if (typeof data === 'string') {
-      return AprimoTokenService.maskSensitiveParams(
-        new URLSearchParams(data)
-      );
-    }
-
-    if (typeof data === 'object') {
-      return JSON.stringify(data);
-    }
-
-    return String(data);
-  }
-
-  private static logTokenError(error: unknown): void {
-    if (axios.isAxiosError(error)) {
-      logger.error({
-        msg: 'Failed to generate Aprimo access token',
-        options: {
-          status: error.response?.status,
-          response: error.response?.data,
-          url: error.config?.url,
-          method: error.config?.method,
-          reqBody: AprimoTokenService.sanitizeTokenRequestBody(
-            error.config?.data
-          ),
-        },
-      });
-
-      return;
-    }
-
-    logger.error({
-      msg: 'Failed to generate Aprimo access token',
-      options: {
-        error: error instanceof Error ? error.message : String(error),
-      },
-    });
-  }
+  return String(data);
 }
-
-export const getAprimoAccessToken = (): Promise<string> =>
-  AprimoTokenService.getAprimoAccessToken();
-
-export default AprimoTokenService;
