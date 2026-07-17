@@ -1,53 +1,135 @@
-5
-import axios from 'axios';
-import logger from './logger';
+6
+export {};
 
-const MASKED_VALUE = '***MASKED***';
+jest.mock('axios', () => ({
+  __esModule: true,
+  default: {
+    post: jest.fn(),
+    isAxiosError: jest.fn(),
+  },
+}));
 
-const sanitizeHeaders = (
-  headers: unknown
-): Record<string, unknown> | undefined => {
-  if (!headers || typeof headers !== 'object') {
-    return undefined;
-  }
+jest.mock('../../config/env', () => ({
+  __esModule: true,
+  default: {
+    APRIMO_TOKEN_URL: 'https://training3.dam.aprimo.com/oauth/token',
+    APRIMO_SCOPE: 'api',
+    APRIMO_CLIENT_ID: 'real-client-id',
+    APRIMO_CLIENT_SECRET: 'real-client-secret',
+  },
+}));
 
-  const headersObject =
-    'toJSON' in headers && typeof headers.toJSON === 'function'
-      ? (headers.toJSON() as Record<string, unknown>)
-      : (headers as Record<string, unknown>);
+jest.mock('../../constants/httpAgent', () => ({
+  httpsAgent: {},
+}));
 
-  return Object.entries(headersObject).reduce<Record<string, unknown>>(
-    (sanitizedHeaders, [key, value]) => {
-      if (
-        key.toLowerCase() === 'authorization' ||
-        key.toLowerCase() === 'proxy-authorization'
-      ) {
-        sanitizedHeaders[key] = MASKED_VALUE;
-        return sanitizedHeaders;
-      }
+const mockLoggerInfo = jest.fn();
+const mockLoggerWarn = jest.fn();
+const mockLoggerError = jest.fn();
 
-      sanitizedHeaders[key] = value;
-      return sanitizedHeaders;
-    },
-    {}
-  );
-};
+jest.mock('../../utils/logger', () => ({
+  __esModule: true,
+  default: {
+    info: mockLoggerInfo,
+    warn: mockLoggerWarn,
+    error: mockLoggerError,
+    debug: jest.fn(),
+  },
+}));
 
-export const logAprimoRequestError = (
-  error: unknown,
-  message: string
-): void => {
-  if (!axios.isAxiosError(error)) {
-    throw error;
-  }
+const mockExecuteWithRetry = jest.fn();
 
-  logger.error({
-    msg: message,
-    options: {
-      status: error.response?.status,
-      response: JSON.stringify(error.response?.data, null, 2),
-      url: error.config?.url,
-      headers: sanitizeHeaders(error.config?.headers),
-    },
+jest.mock('../../utils/httpRetry', () => ({
+  executeWithRetry: mockExecuteWithRetry,
+}));
+
+type AprimoTokenServiceModule =
+  typeof import('../../services/aprimoTokenService');
+
+let getAprimoAccessToken: AprimoTokenServiceModule['getAprimoAccessToken'];
+let mockedAxiosPost: jest.Mock;
+let mockedIsAxiosError: jest.MockedFunction<(error: unknown) => boolean>;
+
+describe('aprimoTokenService sensitive logging', () => {
+  beforeAll(async () => {
+    const axiosModule = await import('axios');
+    const aprimoTokenServiceModule = await import(
+      '../../services/aprimoTokenService'
+    );
+
+    mockedAxiosPost = axiosModule.default.post as unknown as jest.Mock;
+    mockedIsAxiosError = axiosModule.default
+      .isAxiosError as unknown as jest.MockedFunction<
+      (error: unknown) => boolean
+    >;
+
+    getAprimoAccessToken = aprimoTokenServiceModule.getAprimoAccessToken;
   });
-};
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+
+    mockExecuteWithRetry.mockImplementation(
+      async (operation: () => Promise<unknown>) => operation()
+    );
+  });
+
+  it('should log sanitized token request body when token API fails', async () => {
+    mockedIsAxiosError.mockReturnValue(true);
+
+    mockedAxiosPost.mockImplementation(
+      async (url: string, data: string): Promise<never> => {
+        const axiosError = Object.assign(
+          new Error('Request failed with status code 400'),
+          {
+            response: {
+              status: 400,
+              data: {
+                error: 'invalid_client',
+              },
+            },
+            config: {
+              url,
+              method: 'post',
+              data: `${data}&token=real-token&access_token=real-access-token`,
+            },
+          }
+        );
+
+        throw axiosError;
+      }
+    );
+
+    await expect(getAprimoAccessToken()).rejects.toThrow(
+      'Request failed with status code 400'
+    );
+
+    expect(mockLoggerError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        msg: 'Failed to generate aprimo access token',
+        options: expect.objectContaining({
+          status: 400,
+          response: {
+            error: 'invalid_client',
+          },
+          url: 'https://training3.dam.aprimo.com/oauth/token',
+          method: 'post',
+          reqBody: expect.stringContaining('client_id=***MASKED***'),
+        }),
+      })
+    );
+
+    const loggerErrorPayload = mockLoggerError.mock.calls[0][0];
+    const loggedData = JSON.stringify(loggerErrorPayload);
+
+    expect(loggedData).toContain('client_id=***MASKED***');
+    expect(loggedData).toContain('client_secret=***MASKED***');
+    expect(loggedData).toContain('token=***MASKED***');
+    expect(loggedData).toContain('access_token=***MASKED***');
+
+    expect(loggedData).not.toContain('real-client-id');
+    expect(loggedData).not.toContain('real-client-secret');
+    expect(loggedData).not.toContain('real-token');
+    expect(loggedData).not.toContain('real-access-token');
+  });
+});
