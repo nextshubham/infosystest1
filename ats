@@ -1,41 +1,83 @@
-private static maskSensitiveParams(params: URLSearchParams): string {
-  const sensitiveFields = [
-    'client_id',
-    'client_secret',
-    'access_token',
-    'refresh_token',
-    'token',
-  ];
+11
+import axios from 'axios';
+import logger from '../../utils/logger';
+import { logAprimoRequestError } from '../../utils/aprimoErrorLogger';
 
-  sensitiveFields.forEach((field) => {
-    if (params.has(field)) {
-      params.set(field, '***MASKED***');
-    }
+jest.mock('axios');
+
+jest.mock('../../utils/logger', () => ({
+  __esModule: true,
+  default: {
+    error: jest.fn(),
+    info: jest.fn(),
+    warn: jest.fn(),
+    debug: jest.fn(),
+  },
+}));
+
+const mockedIsAxiosError = axios.isAxiosError as unknown as jest.MockedFunction<
+  typeof axios.isAxiosError
+>;
+
+const mockedLoggerError = logger.error as jest.MockedFunction<
+  typeof logger.error
+>;
+
+describe('aprimoErrorLogger', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
   });
 
-  return params.toString();
-}
+  it('should log sanitized Aprimo Axios error', () => {
+    mockedIsAxiosError.mockReturnValue(true);
 
-private static sanitizeTokenRequestBody(data: unknown): string | undefined {
-  if (!data) {
-    return undefined;
-  }
+    const error = {
+      response: {
+        status: 400,
+        data: {
+          message: 'Bad request',
+          token: 'secret-token',
+        },
+      },
+      config: {
+        url: '/api/core/record/123',
+        method: 'get',
+        headers: {
+          Authorization: 'Bearer test-token',
+          Accept: 'application/json',
+        },
+        data: 'client_id=test-client&client_secret=test-secret',
+      },
+    };
 
-  if (data instanceof URLSearchParams) {
-    return AprimoTokenService.maskSensitiveParams(
-      new URLSearchParams(data)
+    logAprimoRequestError(error, 'Aprimo request failed');
+
+    expect(mockedLoggerError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        msg: 'Aprimo request failed',
+        options: expect.objectContaining({
+          status: 400,
+          url: '/api/core/record/123',
+          method: 'get',
+          headers: expect.objectContaining({
+            Authorization: '***MASKED***',
+            Accept: 'application/json',
+          }),
+          reqBody: 'client_id=***MASKED***&client_secret=***MASKED***',
+        }),
+      })
     );
-  }
+  });
 
-  if (typeof data === 'string') {
-    return AprimoTokenService.maskSensitiveParams(
-      new URLSearchParams(data)
+  it('should throw non-Axios error', () => {
+    mockedIsAxiosError.mockReturnValue(false);
+
+    const error = new Error('Normal error');
+
+    expect(() => logAprimoRequestError(error, 'Aprimo request failed')).toThrow(
+      'Normal error'
     );
-  }
 
-  if (typeof data === 'object') {
-    return JSON.stringify(data);
-  }
-
-  return String(data);
-}
+    expect(mockedLoggerError).not.toHaveBeenCalled();
+  });
+});
