@@ -1,3 +1,5 @@
+
+8
 import axios from 'axios';
 import logger from './logger';
 
@@ -35,23 +37,18 @@ const sanitizeUnknownValue = (value: unknown): unknown => {
   }
 
   if (isRecord(value)) {
-    return sanitizeObject(value);
+    return Object.fromEntries(
+      Object.entries(value).map(([key, nestedValue]) => [
+        key,
+        SENSITIVE_FIELD_NAMES.includes(key.toLowerCase())
+          ? MASKED_VALUE
+          : sanitizeUnknownValue(nestedValue),
+      ])
+    );
   }
 
   return value;
 };
-
-const sanitizeObject = (
-  data: Record<string, unknown>
-): Record<string, unknown> =>
-  Object.fromEntries(
-    Object.entries(data).map(([key, value]) => [
-      key,
-      SENSITIVE_FIELD_NAMES.includes(key.toLowerCase())
-        ? MASKED_VALUE
-        : sanitizeUnknownValue(value),
-    ])
-  );
 
 const getHeadersObject = (
   headers: unknown
