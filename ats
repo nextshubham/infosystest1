@@ -1,76 +1,21 @@
-7
-export {};
+const sanitizeHeaders = (
+  headers: unknown
+): Record<string, unknown> | undefined => {
+  if (!headers || typeof headers !== 'object') {
+    return undefined;
+  }
 
-jest.mock('axios', () => ({
-  __esModule: true,
-  default: {
-    isAxiosError: jest.fn(),
-  },
-}));
+  const headersObject =
+    'toJSON' in headers && typeof headers.toJSON === 'function'
+      ? (headers.toJSON() as Record<string, unknown>)
+      : (headers as Record<string, unknown>);
 
-const mockLoggerError = jest.fn();
-
-jest.mock('../../utils/logger', () => ({
-  __esModule: true,
-  default: {
-    error: mockLoggerError,
-    info: jest.fn(),
-    warn: jest.fn(),
-    debug: jest.fn(),
-  },
-}));
-
-import axios from 'axios';
-import { logAprimoRequestError } from '../../utils/aprimoErrorLogger';
-
-const mockedIsAxiosError = axios.isAxiosError as unknown as jest.MockedFunction<
-  (error: unknown) => boolean
->;
-
-describe('aprimoErrorLogger', () => {
-  beforeEach(() => {
-    jest.clearAllMocks();
-  });
-
-  it('should mask Authorization header before logging Aprimo error', () => {
-    mockedIsAxiosError.mockReturnValue(true);
-
-    const error = Object.assign(new Error('Aprimo request failed'), {
-      response: {
-        status: 500,
-        data: {
-          message: 'Internal server error',
-        },
-      },
-      config: {
-        url: '/api/core/record/asset-123',
-        method: 'put',
-        headers: {
-          Authorization: 'Bearer real-access-token',
-          Accept: 'application/json',
-        },
-      },
-    });
-
-    logAprimoRequestError(error, 'Aprimo update record api request failed');
-
-    expect(mockLoggerError).toHaveBeenCalledWith(
-      expect.objectContaining({
-        msg: 'Aprimo update record api request failed',
-        options: expect.objectContaining({
-          status: 500,
-          url: '/api/core/record/asset-123',
-          headers: expect.objectContaining({
-            Authorization: '***MASKED***',
-            Accept: 'application/json',
-          }),
-        }),
-      })
-    );
-
-    const loggedData = JSON.stringify(mockLoggerError.mock.calls[0][0]);
-
-    expect(loggedData).not.toContain('Bearer real-access-token');
-    expect(loggedData).not.toContain('real-access-token');
-  });
-});
+  return Object.fromEntries(
+    Object.entries(headersObject).map(([key, value]) => [
+      key,
+      SENSITIVE_HEADER_NAMES.includes(key.toLowerCase())
+        ? MASKED_VALUE
+        : value,
+    ])
+  );
+};
