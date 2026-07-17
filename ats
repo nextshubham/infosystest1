@@ -1,138 +1,180 @@
-
-8
+9
 import axios from 'axios';
-import logger from './logger';
+import config from '../config/env';
+import httpsAgent from '../constants/httpAgent';
+import { executeWithRetry } from '../utils/httpRetry';
+import logger from '../utils/logger';
 
-const MASKED_VALUE = '***MASKED***';
+interface AprimoTokenResponse {
+  access_token: string;
+  expires_in: number;
+  token_type?: string;
+}
 
-const SENSITIVE_HEADER_NAMES = [
-  'authorization',
-  'proxy-authorization',
-  'cookie',
-  'set-cookie',
-  'x-api-key',
-];
+interface CachedToken {
+  accessToken: string;
+  expiresAt: number;
+}
 
-const SENSITIVE_FIELD_NAMES = [
-  'client_id',
-  'client_secret',
-  'access_token',
-  'refresh_token',
-  'token',
-];
+class AprimoTokenService {
+  private static cachedToken: CachedToken | null = null;
 
-type HeadersWithToJson = {
-  toJSON: () => Record<string, unknown>;
-};
+  private static readonly TOKEN_EXPIRY_BUFFER_MS = 10 * 60 * 1000;
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === 'object' && value !== null && !Array.isArray(value);
+  private static readonly MASKED_VALUE = '***MASKED***';
 
-const hasToJson = (value: unknown): value is HeadersWithToJson =>
-  isRecord(value) && typeof value.toJSON === 'function';
+  private static readonly SENSITIVE_FIELDS = [
+    'client_id',
+    'client_secret',
+    'access_token',
+    'refresh_token',
+    'token',
+  ];
 
-const sanitizeUnknownValue = (value: unknown): unknown => {
-  if (Array.isArray(value)) {
-    return value.map(sanitizeUnknownValue);
+  public static async getAprimoAccessToken(): Promise<string> {
+    if (AprimoTokenService.isCachedTokenValid()) {
+      logger.info({
+        msg: 'Using cached Aprimo access token',
+      });
+
+      return AprimoTokenService.cachedToken!.accessToken;
+    }
+
+    logger.info({
+      msg: 'Generating new Aprimo access token',
+    });
+
+    try {
+      const requestBody = AprimoTokenService.buildTokenRequestBody();
+
+      const response = await executeWithRetry(
+        () =>
+          axios.post<AprimoTokenResponse>(
+            config.aprimo.tokenUrl,
+            requestBody,
+            {
+              headers: {
+                Accept: 'application/json',
+                'Content-Type': 'application/x-www-form-urlencoded',
+              },
+              httpsAgent,
+            }
+          ),
+        'Generate Aprimo access token'
+      );
+
+      const { access_token: accessToken, expires_in: expiresIn } =
+        response.data;
+
+      if (!accessToken) {
+        throw new Error('Aprimo token response does not contain access token');
+      }
+
+      AprimoTokenService.cachedToken = {
+        accessToken,
+        expiresAt:
+          Date.now() +
+          expiresIn * 1000 -
+          AprimoTokenService.TOKEN_EXPIRY_BUFFER_MS,
+      };
+
+      logger.info({
+        msg: 'Aprimo access token generated successfully',
+        options: {
+          expiresIn,
+        },
+      });
+
+      return accessToken;
+    } catch (error) {
+      AprimoTokenService.logTokenError(error);
+      throw error;
+    }
   }
 
-  if (isRecord(value)) {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, nestedValue]) => [
-        key,
-        SENSITIVE_FIELD_NAMES.includes(key.toLowerCase())
-          ? MASKED_VALUE
-          : sanitizeUnknownValue(nestedValue),
-      ])
+  private static isCachedTokenValid(): boolean {
+    return Boolean(
+      AprimoTokenService.cachedToken &&
+        Date.now() < AprimoTokenService.cachedToken.expiresAt
     );
   }
 
-  return value;
-};
+  private static buildTokenRequestBody(): URLSearchParams {
+    const params = new URLSearchParams();
 
-const getHeadersObject = (
-  headers: unknown
-): Record<string, unknown> | undefined => {
-  if (!isRecord(headers)) {
-    return undefined;
+    params.append('grant_type', 'client_credentials');
+    params.append('client_id', config.aprimo.clientId);
+    params.append('client_secret', config.aprimo.clientSecret);
+
+    if (config.aprimo.scope) {
+      params.append('scope', config.aprimo.scope);
+    }
+
+    return params;
   }
 
-  if (hasToJson(headers)) {
-    return headers.toJSON();
-  }
-
-  return headers;
-};
-
-const sanitizeHeaders = (
-  headers: unknown
-): Record<string, unknown> | undefined => {
-  const headersObject = getHeadersObject(headers);
-
-  if (!headersObject) {
-    return undefined;
-  }
-
-  return Object.fromEntries(
-    Object.entries(headersObject).map(([key, value]) => [
-      key,
-      SENSITIVE_HEADER_NAMES.includes(key.toLowerCase())
-        ? MASKED_VALUE
-        : value,
-    ])
-  );
-};
-
-const sanitizeStringBody = (data: string): string => {
-  try {
-    const parsedData = JSON.parse(data) as unknown;
-    return JSON.stringify(sanitizeUnknownValue(parsedData));
-  } catch {
-    const params = new URLSearchParams(data);
-
-    SENSITIVE_FIELD_NAMES.forEach((fieldName) => {
-      if (params.has(fieldName)) {
-        params.set(fieldName, MASKED_VALUE);
+  private static maskSensitiveParams(params: URLSearchParams): string {
+    AprimoTokenService.SENSITIVE_FIELDS.forEach((field) => {
+      if (params.has(field)) {
+        params.set(field, AprimoTokenService.MASKED_VALUE);
       }
     });
 
     return params.toString();
   }
-};
 
-const sanitizeRequestBody = (data: unknown): unknown => {
-  if (!data) {
-    return undefined;
+  private static sanitizeTokenRequestBody(data: unknown): string | undefined {
+    if (!data) {
+      return undefined;
+    }
+
+    if (data instanceof URLSearchParams) {
+      return AprimoTokenService.maskSensitiveParams(
+        new URLSearchParams(data)
+      );
+    }
+
+    if (typeof data === 'string') {
+      return AprimoTokenService.maskSensitiveParams(
+        new URLSearchParams(data)
+      );
+    }
+
+    if (typeof data === 'object') {
+      return JSON.stringify(data);
+    }
+
+    return String(data);
   }
 
-  if (typeof data === 'string') {
-    return sanitizeStringBody(data);
+  private static logTokenError(error: unknown): void {
+    if (axios.isAxiosError(error)) {
+      logger.error({
+        msg: 'Failed to generate Aprimo access token',
+        options: {
+          status: error.response?.status,
+          response: error.response?.data,
+          url: error.config?.url,
+          method: error.config?.method,
+          reqBody: AprimoTokenService.sanitizeTokenRequestBody(
+            error.config?.data
+          ),
+        },
+      });
+
+      return;
+    }
+
+    logger.error({
+      msg: 'Failed to generate Aprimo access token',
+      options: {
+        error: error instanceof Error ? error.message : String(error),
+      },
+    });
   }
+}
 
-  return sanitizeUnknownValue(data);
-};
+export const getAprimoAccessToken = (): Promise<string> =>
+  AprimoTokenService.getAprimoAccessToken();
 
-export const logAprimoRequestError = (
-  error: unknown,
-  message: string
-): void => {
-  if (!axios.isAxiosError(error)) {
-    throw error;
-  }
-
-  logger.error({
-    msg: message,
-    options: {
-      status: error.response?.status,
-      response: JSON.stringify(
-        sanitizeUnknownValue(error.response?.data),
-        null,
-        2
-      ),
-      url: error.config?.url,
-      method: error.config?.method,
-      headers: sanitizeHeaders(error.config?.headers),
-      reqBody: sanitizeRequestBody(error.config?.data),
-    },
-  });
-};
+export default AprimoTokenService;
